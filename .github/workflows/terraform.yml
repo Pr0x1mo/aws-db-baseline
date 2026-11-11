@@ -1,0 +1,81 @@
+# How the Terraform code gets executed. Nobody runs "terraform apply" from a laptop.
+#
+#   Pull request opened  -> format check, validate, plan. The plan is posted for review.
+#   Pull request merged  -> apply, but only after a named approver clicks Approve
+#                           (the "production" environment has required reviewers set in GitHub).
+#
+# The pipeline signs in to AWS with OIDC (OpenID Connect): GitHub gets a short-lived role
+# session for each run, so there are no AWS access keys stored anywhere.
+
+name: terraform-db-baseline
+
+on:
+  pull_request:
+    paths: ["terraform/**"]
+  push:
+    branches: [main]
+    paths: ["terraform/**"]
+
+permissions:
+  id-token: write      # needed for OIDC
+  contents: read
+  pull-requests: write # lets the plan be posted as a PR comment
+
+defaults:
+  run:
+    working-directory: terraform
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::111122223333:role/github-terraform-plan # read-only role
+          aws-region: us-east-1
+
+      - run: terraform fmt -check -recursive
+      - run: terraform init -input=false
+      - run: terraform validate
+      - run: terraform plan -input=false -var-file=prod.tfvars -out=tfplan
+      - run: terraform show -no-color tfplan > plan.txt
+
+      - name: Post the plan on the pull request
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('terraform/plan.txt', 'utf8').slice(0, 60000);
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: '### Terraform plan\n```\n' + plan + '\n```'
+            });
+
+  apply:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: plan
+    runs-on: ubuntu-latest
+    environment: production # required reviewers must approve before this job starts
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::111122223333:role/github-terraform-apply # write role
+          aws-region: us-east-1
+
+      - run: terraform init -input=false
+      - run: terraform apply -input=false -auto-approve -var-file=prod.tfvars
