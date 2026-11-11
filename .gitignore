@@ -1,0 +1,12 @@
+# Terraform working files and state (state can contain sensitive values)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+plan.txt
+crash.log
+
+# Built by Terraform from the Python file at plan time
+terraform/lambda/*.zip
+__pycache__/
